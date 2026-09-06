@@ -1,4 +1,4 @@
-name: Temporary public video download
+name: Package downloaded public footage
 on:
   push:
     branches: [main]
@@ -6,86 +6,53 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
-  download:
+  package:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    timeout-minutes: 10
     steps:
-      - name: Install media tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
-          python -m pip install -q requests beautifulsoup4
-      - name: Retrieve public institutional media
-        run: |
-          python - <<'PY'
-          import requests, pathlib, json, re, html, concurrent.futures, subprocess
-          from urllib.parse import urljoin
-          from bs4 import BeautifulSoup
-          root=pathlib.Path('assets'); root.mkdir(exist_ok=True)
-          manifest=[]
-          def get(name,url,page=''):
-              p=root/name
-              try:
-                  with requests.get(url,headers={'User-Agent':'Mozilla/5.0','Referer':page or url},stream=True,timeout=(15,90)) as r:
-                      r.raise_for_status()
-                      if 'text/html' in r.headers.get('Content-Type','') and p.suffix in ('.mp4','.jpg'):
-                          raise RuntimeError('HTML instead of media')
-                      with p.open('wb') as f:
-                          for b in r.iter_content(1024*512):f.write(b)
-                  info={'file':name,'url':url,'source_page':page,'bytes':p.stat().st_size}
-                  if p.suffix=='.mp4':
-                      q=subprocess.run(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(p)],capture_output=True,text=True,check=True)
-                      info['probe']=json.loads(q.stdout)
-                  manifest.append(info); print('OK',name,p.stat().st_size,flush=True)
-              except Exception as e:
-                  print('FAILED',name,str(e),flush=True)
-                  if p.exists():p.unlink()
-                  manifest.append({'file':name,'url':url,'source_page':page,'error':str(e)})
-          jobs=[
-            ('desi_broll.mp4','https://storage.noirlab.edu/media/archives/videos/hd_1080_screen/02102025-DESI-b-roll.mp4','https://noirlab.edu/public/videos/02102025-DESI-b-roll/'),
-            ('mayall_motion.mp4','https://storage.noirlab.edu/media/archives/videos/hd_1080_screen/02112025-DESI-b-roll-telescope-movement.mp4','https://noirlab.edu/public/videos/02112025-DESI-b-roll-telescope-movement/'),
-            ('wukong_heavy.mp4','https://flv1.gmw.cn/gma/20220222/20220222084053420_5516.mp4','https://politics.gmw.cn/2022-02/22/content_35534451.htm'),
-            ('wukong_launch.mp4','https://video.chinanews.com/flv/2015/1217/wukong.mp4','https://www.chinanews.com.cn/m/gn/2015/12-17/7674899.shtml'),
-            ('wukong_interview.mp4','https://flv1.gmw.cn/soby/sobey/20191112/1573537245371_Middle.mp4','https://kepu.gmw.cn/astro/2019-11/12/content_33353507.htm'),
-            ('desi_interior.jpg','https://storage.noirlab.edu/media/archives/images/large/DESI-004-2-11-24-CC.jpg','https://noirlab.edu/public/images/DESI-004-2-11-24-CC/'),
-            ('desi_exterior.jpg','https://storage.noirlab.edu/media/archives/images/large/noirlab2512h.jpg','https://noirlab.edu/public/images/noirlab2512h/')]
-          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:list(ex.map(lambda a:get(*a),jobs))
-          pages=[
-            ('pmo10','https://pmo.cas.cn/dqyd2019/djspxx2019/kxsp2019/202512/t20251217_8029376.html'),
-            ('csst','https://tech.huanqiu.com/article/4EDCpNPSoDb'),
-            ('wukong_photo','https://www.microsate.com/20th/yxgs/zxrdgs/202307/t20230721_6813885.html')]
-          for key,page in pages:
-              try:
-                  r=requests.get(page,headers={'User-Agent':'Mozilla/5.0'},timeout=35);r.raise_for_status();r.encoding=r.apparent_encoding
-                  raw=r.text; (root/(key+'_page.html')).write_text(raw,encoding='utf-8')
-                  text=html.unescape(raw).replace('\\/','/')
-                  urls=re.findall(r'''(?:https?:)?//[^\s<>"']+?\.mp4(?:\?[^\s<>"']*)?''',text)
-                  soup=BeautifulSoup(raw,'html.parser')
-                  for el in soup.find_all(['source','video','a']):
-                      for attr in ['src','href']:
-                          u=el.get(attr,'')
-                          if '.mp4' in u:urls.append(urljoin(page,u))
-                  for i,u in enumerate(dict.fromkeys(urls)):
-                      if i>=3:break
-                      get(key+str(i)+'.mp4',urljoin(page,u),page)
-                  if key=='wukong_photo':
-                      body=soup.select_one('.TRS_Editor') or soup
-                      imgs=[urljoin(page,e['src']) for e in body.find_all('img',src=True)]
-                      for i,u in enumerate(imgs[:8]):get('wukong_photo'+str(i)+'.jpg',u,page)
-                  print('PAGE',key,'VIDEOS',urls,flush=True)
-              except Exception as e:print('PAGE FAILED',key,str(e),flush=True)
-          (root/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2),encoding='utf-8')
-          for p in root.glob('*.mp4'):
-              q=next(x for x in manifest if x['file']==p.name)
-              duration=float(q['probe']['format']['duration']); step=max(2,duration/24)
-              subprocess.run(['ffmpeg','-v','error','-y','-i',str(p),'-vf',f'fps=1/{step},scale=360:-2,tile=4x6','-frames:v','1',str(root/(p.stem+'_contact.jpg'))],timeout=180)
-          PY
-      - name: Return downloaded public files
-        if: always()
-        uses: actions/upload-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: public-telescope-satellite-media
-          path: assets/
+          run-id: 34012742951
+          github-token: ${{ github.token }}
+          path: assets
+      - name: Split transport archives
+        run: |
+          mkdir -p metadata chunks
+          find assets -maxdepth 1 -type f ! -name '*.mp4' -exec cp {} metadata/ \;
+          cat assets/manifest.json
+          tar -cf - -C assets . | split -b 400M -d -a 2 - chunks/media.tar.part
+          ls -lh chunks metadata
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-media-metadata
+          path: metadata/
           retention-days: 1
           compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-media-part00
+          path: chunks/media.tar.part00
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-media-part01
+          path: chunks/media.tar.part01
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-media-part02
+          path: chunks/media.tar.part02
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-media-part03
+          path: chunks/media.tar.part03
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: ignore
