@@ -10,21 +10,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Install tools
+      - name: Install media tools
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg curl
-          python -m pip install --upgrade yt-dlp
 
       - name: Download official DESI and Wukong footage
         shell: bash
         run: |
           set -euxo pipefail
           mkdir -p assets
-          yt-dlp --no-playlist --merge-output-format mp4 \
-            -f "bv*[height<=1080]+ba/b[height<=1080]" \
-            -o "assets/desi_source.%(ext)s" \
-            "https://vimeo.com/422889846"
+          curl -fL --retry 5 --retry-delay 3 \
+            -A "Mozilla/5.0" \
+            "https://player.vimeo.com/video/422889846/config" \
+            -o assets/vimeo_config.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path('assets/vimeo_config.json').read_text())
+          files=data['request']['files']['progressive']
+          best=max(files,key=lambda x:(x.get('height',0),x.get('bitrate',0)))
+          Path('assets/desi_url.txt').write_text(best['url'])
+          print(best)
+          PY
+          curl -fL --retry 5 --retry-delay 3 \
+            -A "Mozilla/5.0" \
+            "$(cat assets/desi_url.txt)" \
+            -o assets/desi_source.mp4
           curl -fL --retry 5 --retry-delay 3 \
             -A "Mozilla/5.0" \
             -e "https://kepu.gmw.cn/2022-11/18/content_36170439.htm" \
