@@ -1,4 +1,4 @@
-name: Render public astronomy footage
+name: Finalize astronomy video delivery
 on:
   push:
     branches: [main]
@@ -8,226 +8,131 @@ permissions:
   contents: read
   actions: read
 jobs:
-  render:
+  delivery:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
-      - name: Get existing public footage
+      - name: Install utilities
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          python -m pip install -q requests pillow
+      - name: Fetch original 4K excerpts
+        run: |
+          mkdir -p final/Native_4K
+          python - <<'PY'
+          import subprocess,json
+          from pathlib import Path
+          from PIL import Image
+          root=Path('final/Native_4K')
+          source='https://storage.noirlab.edu/media/archives/videos/ultra_hd/02112025-DESI-b-roll-telescope-movement.mp4'
+          rows=[]
+          for i,ss in enumerate([30,260],1):
+              p=root/f'DESI_Mayall_native4K_{i:02}.mp4'
+              try:
+                  subprocess.run(['ffmpeg','-v','error','-y','-rw_timeout','45000000','-ss',str(ss),'-i',source,'-t','12','-an','-c:v','copy','-avoid_negative_ts','make_zero','-movflags','+faststart',str(p)],check=True,timeout=240)
+                  q=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(p)]));s=next(s for s in q['streams'] if s['codec_type']=='video')
+                  if s['width']<3840 or s['height']<2160:raise ValueError('source is not native UHD')
+                  rows.append({'file':p.name,'source':source,'source_page':'https://noirlab.edu/public/videos/02112025-DESI-b-roll-telescope-movement/','source_in_requested':ss,'requested_seconds':12,'probe':q})
+                  frame=root/f'DESI_Mayall_native4K_{i:02}.tif'
+                  subprocess.run(['ffmpeg','-v','error','-y','-ss','2','-i',str(p),'-frames:v','1','-c:v','tiff','-compression_algo','raw',str(frame)],check=True)
+                  print('NATIVE4K',p.name,p.stat().st_size,s['width'],s['height'],flush=True)
+              except Exception as e:
+                  p.unlink(missing_ok=True);print('UHD FAILED',i,str(e),flush=True)
+          (root/'sources_4K.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          (root/'README.txt').write_text('DESI梅奥尔望远镜原生4K实拍片段。直接截取NOIRLab官方4K媒体流，未放大、未AI生成；时间切点受原片关键帧影响，实际时长见sources_4K.json。TIFF为同像素原生视频关键帧。\n来源与署名：DESI Collaboration/DOE/KPNO/NOIRLab/NSF/AURA/M. Sargent (Berkeley Lab)\nhttps://noirlab.edu/public/videos/02112025-DESI-b-roll-telescope-movement/\n使用条件：https://noirlab.edu/public/copyright/\n',encoding='utf-8')
+          PY
+      - name: Wait for rendering
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import requests,os,time
+          url='https://api.github.com/repos/icosmology/jpower/actions/runs/34013974871'
+          for i in range(90):
+              r=requests.get(url,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN']},timeout=30);r.raise_for_status();j=r.json()
+              if j['status']=='completed':
+                  if j['conclusion']!='success':raise RuntimeError('render failed: '+str(j['conclusion']))
+                  break
+              time.sleep(10)
+          else:raise TimeoutError('render did not finish')
+          PY
+      - name: Retrieve rendered packages
+        uses: actions/download-artifact@v4
+        with:
+          run-id: 34013974871
+          github-token: ${{ github.token }}
+          path: render_artifacts
+      - name: Retrieve original public satellite media
         uses: actions/download-artifact@v4
         with:
           name: public-telescope-satellite-media
           run-id: 34012742951
           github-token: ${{ github.token }}
-          path: assets
-      - name: Install media tools
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-noto-cjk
-          python -m pip install -q requests beautifulsoup4 pillow numpy
-      - name: Download additional public footage and photographs
+          path: original
+      - name: Flatten and inspect deliverables
         run: |
           python - <<'PY'
-          import requests,re,json,html,subprocess,io
+          import zipfile,json,shutil,subprocess
           from pathlib import Path
-          from urllib.parse import urljoin
-          from bs4 import BeautifulSoup
-          from PIL import Image
-          root=Path('assets'); extra=[]
-          def fetch(name,url,page=''):
-              p=root/name
-              try:
-                  with requests.get(url,headers={'User-Agent':'Mozilla/5.0','Referer':page or url},timeout=(15,70),stream=True) as r:
-                      r.raise_for_status()
-                      if 'text/html' in r.headers.get('Content-Type',''):raise ValueError('not a media file')
-                      with p.open('wb') as f:
-                          for block in r.iter_content(1048576):f.write(block)
-                  x={'file':name,'url':url,'source_page':page,'bytes':p.stat().st_size}
-                  if p.suffix=='.mp4':
-                      x['probe']=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(p)]))
-                      print('VIDEO',name,[(s.get('width'),s.get('height')) for s in x['probe']['streams'] if s['codec_type']=='video'],flush=True)
-                  else:
-                      im=Image.open(p);x['width'],x['height']=im.size;im.verify(); print('IMAGE',name,x['width'],x['height'],flush=True)
-                  extra.append(x);return True
-              except Exception as e:
-                  print('DOWNLOAD FAILED',name,str(e),flush=True)
-                  p.unlink(missing_ok=True);return False
-          fetch('desi_map.mp4','https://storage.noirlab.edu/media/archives/videos/hd_1080_screen/noirlab2512h.mp4','https://noirlab.edu/public/videos/noirlab2512h/')
-          fetch('wukong_concept.png','https://www.cas.cn/cm/202411/W020241128363309676597.png','https://www.cas.cn/cm/202411/t20241128_5040715.shtml')
-          fetch('wukong_team.png','https://www.cas.cn/cm/202411/W020241128363309761087.png','https://www.cas.cn/cm/202411/t20241128_5040715.shtml')
-          pages=[('wukong_news','https://www.dzwww.com/news/yw/202604/t20260430_17689396.htm'),('wukong_cnr','https://news.cnr.cn/native/gd/kx/20260430/t20260430_527606134.shtml'),('wukong2019','https://www.chinanews.com.cn/gn/2019/07-25/8906091.shtml')]
-          for key,page in pages:
-              try:
-                  r=requests.get(page,timeout=35);r.raise_for_status();r.encoding=r.apparent_encoding
-                  raw=html.unescape(r.text).replace('\\/','/')
-                  (root/(key+'_page.html')).write_text(raw,encoding='utf-8')
-                  urls=list(dict.fromkeys(re.findall(r'''(?:https?:)?//[^\s<>"']+?\.mp4(?:\?[^\s<>"']*)?''',raw)))
-                  soup=BeautifulSoup(raw,'html.parser')
-                  for el in soup.find_all(['video','source']):
-                      u=el.get('src','')
-                      if '.mp4' in u:urls.append(urljoin(page,u))
-                  for i,u in enumerate(list(dict.fromkeys(urls))[:2]):fetch(key+str(i)+'.mp4',urljoin(page,u),page)
-                  print('PAGE MEDIA',key,urls,flush=True)
-              except Exception as e:print('PAGE FAILED',key,str(e),flush=True)
-          (root/'extra_manifest.json').write_text(json.dumps(extra,ensure_ascii=False,indent=2),encoding='utf-8')
+          r=Path('render_artifacts');f=Path('final')
+          mapping={'Film_1080p.zip':'Film_1080p','Film_6to1.zip':'Film_6to1','Selected_Real_Video_Clips.zip':'Video_Clips','Source_Photographs.zip':'Photographs'}
+          for archive in r.rglob('*.zip'):
+              if archive.name not in mapping:continue
+              dest=f/mapping[archive.name];dest.mkdir(parents=True,exist_ok=True)
+              with zipfile.ZipFile(archive) as z:z.extractall(dest)
+          src=Path('original');out=f/'DAMPE_Originals';out.mkdir(exist_ok=True)
+          for name in ['pmo100.mp4','wukong_launch.mp4','wukong_interview.mp4','csst0.mp4','manifest.json']:
+              shutil.copy2(src/name,out/name)
+          (out/'README.txt').write_text('悟空号、发射、科研访谈及CSST公开原片。文件保持下载时原始编码及像素，不进行伪高清放大。pmo100.mp4是紫金山天文台在轨十周年专题的公开网络版，960×544；wukong_launch.mp4是2015年发射历史影像，800×450；wukong_interview.mp4是科研访谈，1280×720；csst0.mp4是CSST公开演示，1280×720。\n这些公开版本不满足院里原生1080p最低要求，作为选镜与联系调片参考；正式广播版请向来源单位确认高清母版和授权。来源链接及原生参数见manifest.json。',encoding='utf-8')
+          # Add the full official credit supplied for the Mayall footage.
+          credit='DESI Mayall telescope footage credit: DESI Collaboration/DOE/KPNO/NOIRLab/NSF/AURA/M. Sargent (Berkeley Lab)\nSource: https://noirlab.edu/public/videos/02112025-DESI-b-roll-telescope-movement/\nTerms: https://noirlab.edu/public/copyright/\nOther media: exact source pages in sources.json; retain their individual credits and confirm public-broadcast permission.\n'
+          for folder in ['Film_1080p','Film_6to1','Video_Clips','Photographs']:(f/folder/'CREDITS.txt').write_text(credit,encoding='utf-8')
+          for folder in sorted(f.iterdir()):
+              if not folder.is_dir():continue
+              total=sum(p.stat().st_size for p in folder.rglob('*') if p.is_file()); print('PACKAGE_CONTENT',folder.name,total,flush=True)
+              for p in folder.glob('*.mp4'):
+                  j=json.loads(subprocess.check_output(['ffprobe','-v','error','-show_entries','format=duration,size:stream=codec_name,width,height','-of','json',str(p)]));print('MP4',p.name,json.dumps(j),flush=True)
           PY
-      - name: Produce edited footage and delivery packages
-        run: |
-          cat > /tmp/render.py <<'PY'
-          from pathlib import Path
-          import subprocess,json,math,wave,shutil,csv,hashlib,zipfile
-          import numpy as np
-          from PIL import Image,ImageDraw,ImageFont
-          A=Path('assets'); W=Path('work'); W.mkdir(exist_ok=True)
-          O=Path('delivery'); O.mkdir(exist_ok=True)
-          D=O/'documentation';D.mkdir(exist_ok=True)
-          C=O/'clips';C.mkdir(exist_ok=True)
-          P=O/'photos';P.mkdir(exist_ok=True)
-          def run(args):subprocess.run(args,check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
-          def probe(p):return json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(p)]))
-          def dimensions(p):
-              s=next(s for s in probe(p)['streams'] if s['codec_type']=='video');return s['width'],s['height']
-          manifests=json.loads((A/'manifest.json').read_text())+json.loads((A/'extra_manifest.json').read_text())
-          # A visual assembly of public footage, without private application documents or proposed research targets.
-          hd=[]
-          for p in sorted(A.glob('wukong_news*.mp4'))+sorted(A.glob('wukong_cnr*.mp4'))+sorted(A.glob('wukong2019*.mp4')):
-              if dimensions(p)[1]>=1080:hd.append(p)
-          sat=hd[0] if hd else A/'pmo100.mp4'
-          print('SELECTED DAMPE',str(sat),dimensions(sat),flush=True)
-          plan=[
-            ('desi_map.mp4',28,6,'暗物质暗能量本质','THE DARK UNIVERSE','数据可视化 | DESI / NOIRLab'),
-            ('desi_broll.mp4',8,5,'DESI 暗能量光谱仪','DARK ENERGY SPECTROSCOPIC INSTRUMENT','实拍 | KPNO / NOIRLab'),
-            ('mayall_motion.mp4',30,5,'大型望远镜与精密观测','TELESCOPE OPERATIONS','实拍 | KPNO / NOIRLab'),
-            ('desi_broll.mp4',38,5,'大型光谱巡天','SPECTROSCOPIC SURVEYS','实拍 | KPNO / NOIRLab'),
-            ('desi_broll.mp4',72,5,'观测设备与运行现场','INSTRUMENTS AND OPERATIONS','实拍 | KPNO / NOIRLab'),
-            ('desi_map.mp4',92,6,'三维宇宙地图','MAPPING THE UNIVERSE IN THREE DIMENSIONS','数据可视化 | DESI / NOIRLab'),
-            ('desi_map.mp4',125,6,'星系与宇宙大尺度结构','GALAXIES AND LARGE-SCALE STRUCTURE','数据可视化 | DESI / NOIRLab'),
-            ('desi_broll.mp4',138,5,'从观测走向科学数据','FROM OBSERVATIONS TO DATA','实拍 | KPNO / NOIRLab'),
-            ('desi_broll.mp4',184,5,'精密仪器与数据分析','PRECISION INSTRUMENTS AND DATA ANALYSIS','实拍 | KPNO / NOIRLab'),
-            ('wukong_launch.mp4',7,5,'悟空号：从地面走向太空','DAMPE: FROM EARTH TO SPACE','2015年发射历史影像 | 中国新闻网'),
-            (sat.name,18,5,'悟空号 暗物质粒子探测卫星','DARK MATTER PARTICLE EXPLORER','公开专题影像 | 紫金山天文台 / 新闻媒体'),
-            (sat.name,42,5,'空间高能粒子探测','HIGH-ENERGY PARTICLE OBSERVATIONS','公开专题影像 | 紫金山天文台 / 新闻媒体'),
-            (sat.name,68,5,'长期观测与科学积累','LONG-TERM OBSERVATIONS','公开专题影像 | 紫金山天文台 / 新闻媒体'),
-            ('wukong_interview.mp4',42,5,'科研团队与科学研究','SCIENTIFIC RESEARCH','科研访谈 | 光明网 / 科普中国'),
-            (sat.name,112,5,'宇宙线与伽马射线','COSMIC RAYS AND GAMMA RAYS','公开专题影像 | 紫金山天文台 / 新闻媒体'),
-            ('csst0.mp4',9,6,'中国巡天空间望远镜','CHINESE SPACE STATION TELESCOPE','公开演示影像 | 央视新闻 / 环球网'),
-            ('mayall_motion.mp4',260,5,'多设施观测与独立检验','COMPLEMENTARY OBSERVATIONS','实拍 | KPNO / NOIRLab'),
-            (sat.name,145,5,'探索宇宙暗成分','EXPLORING THE DARK UNIVERSE','公开专题影像 | 紫金山天文台 / 新闻媒体'),
-            ('desi_map.mp4',145,6,'暗物质暗能量本质','THE DARK UNIVERSE','数据可视化 | DESI / NOIRLab')]
-          font='/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
-          bold='/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc'
-          rows=[];t=0;chap=[]
-          for i,(name,ss,dur,zh,en,credit) in enumerate(plan):
-              source=A/name; pd=probe(source);duration=float(pd['format']['duration']);ss=min(ss,max(0,duration-dur-1))
-              clean=C/f'{i+1:02d}_{source.stem}.mp4'
-              filt='scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps=25'
-              run(['ffmpeg','-v','error','-y','-ss',str(ss),'-i',str(source),'-t',str(dur),'-an','-vf',filt,'-c:v','libx264','-preset','fast','-crf','20','-threads','2','-pix_fmt','yuv420p','-movflags','+faststart',str(clean)])
-              w,h=dimensions(source)
-              rows.append({'shot':i+1,'timeline_start':t,'duration':dur,'source_file':name,'source_in':ss,'source_width':w,'source_height':h,'caption':zh,'source_credit':credit,'quality_note':'原生1080p或以上' if h>=1080 else '公开低清/历史影像；输出尺寸不代表原生清晰度'})
-              chap.append((t,t+dur,zh,en,credit));t+=dur
-              print('SHOT',i+1,name,ss,dur,flush=True)
-          concat=W/'list.txt';concat.write_text(''.join("file '"+str(p.resolve())+"'\n" for p in sorted(C.glob('*.mp4'))))
-          raw=W/'clean_sequence.mp4';run(['ffmpeg','-v','error','-y','-f','concat','-safe','0','-i',str(concat),'-c','copy',str(raw)])
-          # Caption cards remain small overlays on continuously moving footage, never slides.
-          overlay=W/'overlay.ass'
-          def ats(x):
-              cs=round(x*100);return f'{cs//360000}:{cs//6000%60:02}:{cs//100%60:02}.{cs%100:02}'
-          ass='[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Title,Noto Sans CJK SC,42,&H00FFFFFF,&H000000FF,&H98000000,&H98000000,-1,0,0,0,100,100,1,0,1,2,1,7,75,75,66,1\nStyle: English,Noto Sans,21,&H00E8CE9D,&H000000FF,&HA0000000,&HA0000000,0,0,0,0,100,100,1,0,1,1,1,7,77,75,124,1\nStyle: Credit,Noto Sans CJK SC,21,&H00FFFFFF,&H000000FF,&HA0000000,&HA0000000,0,0,0,0,100,100,0,0,1,1,1,3,45,45,30,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n'
-          for st,ed,z,e,c in chap:
-              for style,text in [('Title',z),('English',e),('Credit',c)]:ass+=f'Dialogue: 0,{ats(st)},{ats(ed)},{style},,0,0,0,,{{\\fad(180,180)}}{text}\n'
-          overlay.write_text(ass,encoding='utf-8')
-          # Original unobtrusive instrumental bed, no sampled recordings and no imitation of a person.
-          sr=48000;n=int((t+.1)*sr);x=np.arange(n)/sr;audio=np.zeros(n,dtype=np.float32)
-          notes=[[130.81,196.,261.63],[110.,164.81,220.],[87.31,130.81,174.61],[98.,146.83,196.]]
-          for j,start in enumerate(np.arange(0,t,8.0)):
-              idx=(x>=start)&(x<min(t,start+9));tt=x[idx]-start;env=np.minimum(1,tt/1.4)*np.minimum(1,np.maximum(0,(9-tt)/2))
-              for f in notes[j%4]:audio[idx]+=.025*env*(np.sin(2*np.pi*f*tt)+.25*np.sin(2*np.pi*2*f*tt))
-          audio*=np.minimum(1,x/3)*np.minimum(1,np.maximum(0,(t-x)/4));audio=np.clip(audio,-.6,.6)
-          pcm=np.stack((audio,np.roll(audio,480)),axis=1)
-          with wave.open(str(W/'score.wav'),'wb') as f:f.setnchannels(2);f.setsampwidth(2);f.setframerate(sr);f.writeframes((pcm*32767).astype('<i2').tobytes())
-          final=O/'Dark_Universe_Real_Footage_1080p.mp4'
-          run(['ffmpeg','-v','error','-y','-i',str(raw),'-i',str(W/'score.wav'),'-vf',f'drawbox=x=45:y=42:w=1020:h=121:color=black@0.40:t=fill,ass={overlay},fade=t=in:st=0:d=0.8,fade=t=out:st={t-1}:d=1','-c:v','libx264','-preset','fast','-crf','22','-maxrate','6M','-bufsize','12M','-threads','2','-c:a','aac','-b:a','160k','-t',str(t),'-movflags','+faststart',str(final)])
-          # Six-to-one display counterpart: source image aspect ratios preserved.
-          bg=Image.new('RGB',(6480,1080),(4,14,33)); dr=ImageDraw.Draw(bg)
-          for y in range(1080):
-              u=y/1080;dr.line((0,y,6480,y),fill=(4+int(3*u),14+int(12*u),33+int(23*u)))
-          ft=ImageFont.truetype(bold,74);fs=ImageFont.truetype(font,37);fe=ImageFont.truetype(font,32)
-          dr.text((270,245),'暗物质暗能量本质',font=ft,fill=(224,200,142))
-          dr.text((274,370),'THE DARK UNIVERSE',font=fs,fill=(210,219,229))
-          dr.line((274,470,1750,470),fill=(122,111,82),width=3)
-          dr.text((274,535),'星系巡天  ·  空间粒子探测',font=fs,fill=(211,220,230))
-          dr.text((274,602),'实拍影像与科学数据可视化',font=fe,fill=(146,166,186))
-          units=[('中国科学院国家天文台','National Astronomical Observatories, CAS'),('中国科学院紫金山天文台','Purple Mountain Observatory, CAS'),('中国科学技术大学','University of Science and Technology of China')]
-          for j,(z,e) in enumerate(units):
-              dr.text((4710,260+j*188),z,font=ImageFont.truetype(bold,48),fill=(224,200,142));dr.text((4710,329+j*188),e,font=fe,fill=(195,211,226))
-          bg.save(W/'wide_frame.png')
-          wide=O/'Dark_Universe_Real_Footage_6to1.mp4'
-          run(['ffmpeg','-v','error','-y','-loop','1','-i',str(W/'wide_frame.png'),'-i',str(final),'-filter_complex','[0:v][1:v]overlay=2280:0:shortest=1[v]','-map','[v]','-map','1:a','-c:v','libx264','-preset','fast','-crf','23','-maxrate','6M','-bufsize','12M','-threads','2','-pix_fmt','yuv420p','-c:a','copy','-t',str(t),'-movflags','+faststart',str(wide)])
-          for p in [A/'desi_interior.jpg',A/'desi_exterior.jpg',A/'wukong_concept.png',A/'wukong_team.png']:
-              if p.exists():shutil.copy2(p,P/p.name)
-          # Native-size TIFF derivatives: lossless containers, no invented pixels or file-size padding.
-          for p in list(P.iterdir()):
-              im=Image.open(p).convert('RGB');im.save(P/(p.stem+'_native.tif'),compression='raw')
-          for i,(ss,name) in enumerate([(12,'desi_broll.mp4'),(37,'desi_map.mp4'),(37,sat.name)]):
-              src=A/name;dur=float(probe(src)['format']['duration']);ss=min(ss,dur-1)
-              fn=W/f'key{i}.png';run(['ffmpeg','-v','error','-y','-ss',str(ss),'-i',str(src),'-frames:v','1',str(fn)])
-              im=Image.open(fn).convert('RGB');im.save(P/f'keyframe_{i+1:02d}_{src.stem}_native.tif',compression='raw')
-          with (D/'shot_list.csv').open('w',newline='',encoding='utf-8-sig') as f:w=csv.DictWriter(f,fieldnames=rows[0].keys());w.writeheader();w.writerows(rows)
-          (D/'sources.json').write_text(json.dumps(manifests,ensure_ascii=False,indent=2),encoding='utf-8')
-          text='真实视频素材交付说明\n\n两个MP4为连续运动影像的剪辑成片，含镜头名称、中英文简短标注及原创器乐底音；无旁白，未叠加项目原稿长字幕。并非最终播出版，供影像中心配合院定脚本制作。\n\n1080p版为1920×1080；超宽版为6480×1080、6:1。超宽版中央保留1920×1080画面，不横向拉伸。输出画幅不等于所有来源原生分辨率。DESI实拍和地图原片为1080p；部分悟空号及CSST公开历史/专题影像低于1080p，详见shot_list.csv，需正式高清母版时应向相应单位索取。\n\n图片保留原始下载版本；另附同像素尺寸无损TIFF，未放大、未填充文件。低于4MB或低像素图片仅作参考，不冒充达到高清要求。\n\nNOIRLab画面包括实拍及DESI三维数据可视化，两者不得混称实拍；悟空号/CSST专题可能包含在轨概念动画，不能表述为在轨摄影。科学能谱特征不等于已发现暗物质。\n\n署名与权限：NOIRLab具体素材按其来源页署名要求；中国科学院、光明网、科普中国、中国新闻网、央视新闻等材料系公开来源，不等于取得公开发布或转授权许可。供单位内部提交与剪辑审看；正式公开播出前由影像中心确认使用许可并保留必要署名。原节目台标和版权标识未主动移除。\n\n本包不包含旧版PPT动画、卡通讲解片或重复的低码率视频。'
-          (D/'README_交付说明.txt').write_text(text,encoding='utf-8')
-          checks=[]
-          for p in [final,wide]:
-              q=probe(p);run(['ffmpeg','-v','error','-i',str(p),'-f','null','-'])
-              checks.append({'file':p.name,'bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest(),'probe':q,'full_decode':'passed'})
-          (D/'technical_check.json').write_text(json.dumps(checks,ensure_ascii=False,indent=2),encoding='utf-8')
-          for c in checks:print('FINAL',c['file'],c['bytes'],c['probe']['format']['duration'],flush=True)
-          run(['ffmpeg','-v','error','-y','-i',str(final),'-vf','fps=1/5,scale=384:-2,tile=4x5','-frames:v','1',str(D/'film_contact.jpg')])
-          # Independent archives, not multi-part tar volumes.
-          for name,paths in [('Film_1080p',[final,*D.iterdir()]),('Film_6to1',[wide,D/'README_交付说明.txt']),('Selected_Real_Video_Clips',[*C.iterdir(),*D.iterdir()]),('Source_Photographs',[*P.iterdir(),D/'sources.json',D/'README_交付说明.txt'])]:
-              with zipfile.ZipFile(O/(name+'.zip'),'w',compression=zipfile.ZIP_DEFLATED,compresslevel=1) as z:
-                  for p in paths:z.write(p,p.name)
-              print('PACKAGE',name,(O/(name+'.zip')).stat().st_size,flush=True)
-          PY
-          python /tmp/render.py
-      - name: Film 1080p
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: Film-1080p
-          path: delivery/Film_1080p.zip
+          name: FINAL-Film-1080p
+          path: final/Film_1080p/
           retention-days: 7
           compression-level: 0
-      - name: Film 6to1
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: Film-6to1
-          path: delivery/Film_6to1.zip
+          name: FINAL-Film-6to1
+          path: final/Film_6to1/
           retention-days: 7
           compression-level: 0
-      - name: Selected video clips
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: Selected-Real-Video-Clips
-          path: delivery/Selected_Real_Video_Clips.zip
+          name: FINAL-Video-Clips
+          path: final/Video_Clips/
           retention-days: 7
           compression-level: 0
-      - name: Source photographs
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: Source-Photographs
-          path: delivery/Source_Photographs.zip
+          name: FINAL-Photographs
+          path: final/Photographs/
+          retention-days: 7
+          compression-level: 6
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: FINAL-DAMPE-Originals
+          path: final/DAMPE_Originals/
           retention-days: 7
           compression-level: 0
-      - name: Return diagnostics
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: Render-diagnostics
-          path: |
-            assets/extra_manifest.json
-            delivery/documentation/
+          name: FINAL-Native-4K-DESI
+          path: final/Native_4K/
           retention-days: 7
-          compression-level: 0
+          compression-level: 3
