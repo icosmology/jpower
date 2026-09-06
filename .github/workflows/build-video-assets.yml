@@ -1,0 +1,47 @@
+name: Build dark-universe video assets
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  download-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg curl
+          python -m pip install --upgrade yt-dlp
+
+      - name: Download official DESI and Wukong footage
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p assets
+          yt-dlp --no-playlist --merge-output-format mp4 \
+            -f "bv*[height<=1080]+ba/b[height<=1080]" \
+            -o "assets/desi_source.%(ext)s" \
+            "https://www.youtube.com/watch?v=4s5FRLzzwCo"
+          curl -fL --retry 5 --retry-delay 3 \
+            "https://flv1.gmw.cn/gma/20221118/20221118164002706_0963.mp4" \
+            -o assets/wukong_source.mp4
+          ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of default=noprint_wrappers=1 assets/desi_source.mp4 > assets/desi_info.txt
+          ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,width,height,r_frame_rate \
+            -of default=noprint_wrappers=1 assets/wukong_source.mp4 > assets/wukong_info.txt
+
+      - name: Create review contact sheets
+        run: |
+          ffmpeg -y -i assets/desi_source.mp4 -vf "fps=1/10,scale=480:-2,tile=4x4" -frames:v 1 assets/desi_contact.jpg
+          ffmpeg -y -i assets/wukong_source.mp4 -vf "fps=1/15,scale=480:-2,tile=4x4" -frames:v 1 assets/wukong_contact.jpg
+
+      - name: Upload footage
+        uses: actions/upload-artifact@v4
+        with:
+          name: dark-universe-source-footage
+          path: assets/
+          retention-days: 1
+          compression-level: 0
