@@ -24,8 +24,10 @@ jobs:
           yt-dlp --no-playlist --merge-output-format mp4 \
             -f "bv*[height<=1080]+ba/b[height<=1080]" \
             -o "assets/desi_source.%(ext)s" \
-            "https://www.youtube.com/watch?v=4s5FRLzzwCo"
+            "https://vimeo.com/422889846"
           curl -fL --retry 5 --retry-delay 3 \
+            -A "Mozilla/5.0" \
+            -e "https://kepu.gmw.cn/2022-11/18/content_36170439.htm" \
             "https://flv1.gmw.cn/gma/20221118/20221118164002706_0963.mp4" \
             -o assets/wukong_source.mp4
           ffprobe -v error -show_entries format=duration,size -show_entries stream=codec_name,width,height,r_frame_rate \
