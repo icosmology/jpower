@@ -22,20 +22,7 @@ jobs:
           mkdir -p assets
           curl -fL --retry 5 --retry-delay 3 \
             -A "Mozilla/5.0" \
-            "https://player.vimeo.com/video/422889846/config" \
-            -o assets/vimeo_config.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          data=json.loads(Path('assets/vimeo_config.json').read_text())
-          files=data['request']['files']['progressive']
-          best=max(files,key=lambda x:(x.get('height',0),x.get('bitrate',0)))
-          Path('assets/desi_url.txt').write_text(best['url'])
-          print(best)
-          PY
-          curl -fL --retry 5 --retry-delay 3 \
-            -A "Mozilla/5.0" \
-            "$(cat assets/desi_url.txt)" \
+            "https://storage.noirlab.edu/media/archives/videos/hd_1080_screen/noirlab2512h.mp4" \
             -o assets/desi_source.mp4
           curl -fL --retry 5 --retry-delay 3 \
             -A "Mozilla/5.0" \
@@ -53,6 +40,7 @@ jobs:
           ffmpeg -y -i assets/wukong_source.mp4 -vf "fps=1/15,scale=480:-2,tile=4x4" -frames:v 1 assets/wukong_contact.jpg
 
       - name: Upload footage
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dark-universe-source-footage
